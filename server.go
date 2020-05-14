@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +38,14 @@ type server struct {
 	Timeout       time.Duration
 	mapTimeouts   map[string]time.Time
 }
+
+var (
+	tr = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	httpsProto = "https://"
+	httpProto  = "http://"
+)
 
 func newServer(info serverInfo) *server {
 	fmt.Println(info)
@@ -106,25 +115,21 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok ||
 		time.Now().Sub(cacheTime).Nanoseconds() > s.Timeout.Nanoseconds() {
 		fmt.Println("Requesting to main server..", s.RemoteAddress, r.RequestURI)
-		client := http.Client{Timeout: s.Timeout}
-		uri := fmt.Sprintf("http://%s%s", s.RemoteAddress, r.RequestURI)
+		client := http.Client{Timeout: s.Timeout, Transport: tr}
+		uri := ""
+		if strings.Contains(s.RemoteAddress, httpProto) || strings.Contains(s.RemoteAddress, httpsProto) {
+			uri = s.RemoteAddress + r.RequestURI
+		} else {
+			uri = fmt.Sprintf("http://%s/%s", s.RemoteAddress, r.RemoteAddr)
+		}
 		var (
 			resp *http.Response
 			err  error
 		)
-		switch r.Method {
-		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-			resp, err = s.request(uri, buf, contentSize, r, client)
-			if err != nil {
-				fmt.Println("Request to " + uri + " failed: " + err.Error())
-				return
-			}
-		case http.MethodGet:
-			resp, err = client.Get(uri)
-			if err != nil {
-				fmt.Println("GET Request to " + uri + " failed: " + err.Error())
-				return
-			}
+		resp, err = s.request(uri, buf, contentSize, r, client)
+		if err != nil {
+			fmt.Println("Request to " + uri + " failed: " + err.Error())
+			return
 		}
 		//write all request/response info in files to be reusable
 		s.writeFiles(r, resp, buf, f)
