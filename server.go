@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -26,9 +27,9 @@ func serve(info serverInfo) {
 }
 
 type requestInfo struct {
-	responseFile    string
 	requestFile     string
 	requestHeaders  string
+	responseFile    string
 	responseHeaders string
 }
 
@@ -105,10 +106,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//check if the content is not cached
 	cacheTime, ok := s.mapTimeouts[hash]
 	f := requestInfo{
-		responseFile:    filepath.Join(s.CacheFolder, hash),
-		requestFile:     filepath.Join(s.CacheFolder, hash+".req"),
-		requestHeaders:  filepath.Join(s.CacheFolder, hash+".req.headers.json"),
+		requestFile:    filepath.Join(s.CacheFolder, hash+".req"),
+		requestHeaders: filepath.Join(s.CacheFolder, hash+".req.headers.json"),
+
 		responseHeaders: filepath.Join(s.CacheFolder, hash+".res.headers.json"),
+		responseFile:    filepath.Join(s.CacheFolder, hash),
 	}
 	//if thecontent doesn't exists, or its too old to be used,
 	//we will request it to the main server
@@ -147,7 +149,7 @@ func (s *server) writeFiles(r *http.Request, resp *http.Response, buf bytes.Buff
 	fmt.Println("Writing response", err)
 	err = writeToFile(&buf, f.requestFile)
 	fmt.Println("Writing request", err)
-	err = writeHeadersToFile(resp.Header, f.responseHeaders)
+	err = writeResponseHeadersToFile(resp.Header, resp.StatusCode, f.responseHeaders)
 	fmt.Println("Writing response headers", err)
 }
 
@@ -178,7 +180,22 @@ func readHeadersFromFile(w http.ResponseWriter, filepath string) error {
 			w.Header().Add(header, v)
 		}
 	}
+	s := resHeader.Get("Status")
+	status, _ := strconv.Atoi(s)
+	if status != 0 {
+		w.WriteHeader(status)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
 	return nil
+}
+
+func writeResponseHeadersToFile(h http.Header, status int, filepath string) error {
+	if h == nil {
+		h = make(http.Header)
+	}
+	h["Status"] = []string{fmt.Sprint(status)}
+	return writeHeadersToFile(h, filepath)
 }
 
 func writeHeadersToFile(h http.Header, filepath string) error {
