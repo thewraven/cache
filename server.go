@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"time"
 )
+
+const Status = "Status"
 
 func serve(info serverInfo) {
 	server := newServer(info)
@@ -38,6 +41,11 @@ type server struct {
 	CacheFolder   string
 	Timeout       time.Duration
 	mapTimeouts   map[string]time.Time
+	l             logger
+}
+
+type logger interface {
+	Println(...interface{})
 }
 
 var (
@@ -49,12 +57,19 @@ var (
 )
 
 func newServer(info serverInfo) *server {
-	fmt.Println(info)
+	log.Println(info)
+	pf := info.Name
+	if pf == "" {
+		pf = info.CachePath
+	}
+	pf += ": "
+	l := log.New(os.Stdout, pf, log.Flags())
 	server := server{
 		RemoteAddress: info.RemoteAddress,
 		CacheFolder:   info.CachePath,
 		Timeout:       time.Duration(info.Timeout) * time.Minute,
 		mapTimeouts:   make(map[string]time.Time),
+		l:             l,
 	}
 	os.MkdirAll(server.CacheFolder, os.ModeDir|0755)
 	//check for existing files in cache
@@ -78,23 +93,23 @@ func (s *server) hashRequest(r *http.Request) (bytes.Buffer, int, string) {
 	contentSize := buf.Len()
 	buf.WriteString(r.RequestURI)
 	hash := fmt.Sprintf("%x", md5.Sum(buf.Bytes()))
-	fmt.Println(hash)
+	s.l.Println(hash)
 	return buf, contentSize, hash
 }
 
 func (s *server) request(uri string, buf bytes.Buffer, sz int, r *http.Request, client http.Client) (*http.Response, error) {
 	contentBuf := bytes.NewBuffer(buf.Bytes())
 	contentBuf.Truncate(sz)
-	fmt.Println(r.Method + " request to " + contentBuf.String())
+	s.l.Println(r.Method + " request to " + contentBuf.String())
 	request, err := http.NewRequest(r.Method, uri, contentBuf)
 	if err != nil {
-		fmt.Println(r.Method + " request to " + uri + " failed: " + err.Error())
+		s.l.Println(r.Method + " request to " + uri + " failed: " + err.Error())
 		return nil, err
 	}
-	copyHeaders(request, r)
+	s.copyHeaders(request, r)
 	resp, err := client.Do(request)
 	if err != nil {
-		fmt.Println(r.Method + " request to " + uri + " failed: " + err.Error())
+		s.l.Println(r.Method + " request to " + uri + " failed: " + err.Error())
 		return nil, err
 	}
 	return resp, nil
@@ -116,7 +131,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//we will request it to the main server
 	if !ok ||
 		time.Now().Sub(cacheTime).Nanoseconds() > s.Timeout.Nanoseconds() {
-		fmt.Println("Requesting to main server..", s.RemoteAddress, r.RequestURI)
+		s.l.Println("Requesting to main server..", s.RemoteAddress, r.RequestURI)
 		client := http.Client{Timeout: s.Timeout, Transport: tr}
 		uri := ""
 		if strings.Contains(s.RemoteAddress, httpProto) || strings.Contains(s.RemoteAddress, httpsProto) {
@@ -130,7 +145,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		)
 		resp, err = s.request(uri, buf, contentSize, r, client)
 		if err != nil {
-			fmt.Println("Request to " + uri + " failed: " + err.Error())
+			s.l.Println("Request to " + uri + " failed: " + err.Error())
 			return
 		}
 		//write all request/response info in files to be reusable
@@ -138,50 +153,66 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mapTimeouts[hash] = time.Now()
 	}
 	//writes the content information from the files to the actual response
-	readHeadersFromFile(w, f.responseHeaders)
-	http.ServeFile(w, r, f.responseFile)
+	s.readHeadersFromFile(w, f.responseHeaders)
+	err := s.serveFile(w, f.responseFile)
+	if err != nil {
+		s.l.Println("Error serving response file ", err)
+	}
+}
+
+func (s *server) serveFile(w http.ResponseWriter, fn string) error {
+	f, err := os.Open(fn)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(w, f)
+	return err
 }
 
 func (s *server) writeFiles(r *http.Request, resp *http.Response, buf bytes.Buffer, f requestInfo) {
 	err := writeHeadersToFile(r.Header, f.requestHeaders)
-	fmt.Println("Writing request headers", err)
+	s.l.Println("Writing request headers", err)
 	err = writeToFile(resp.Body, f.responseFile)
-	fmt.Println("Writing response", err)
+	s.l.Println("Writing response", err)
 	err = writeToFile(&buf, f.requestFile)
-	fmt.Println("Writing request", err)
+	s.l.Println("Writing request", err)
 	err = writeResponseHeadersToFile(resp.Header, resp.StatusCode, f.responseHeaders)
-	fmt.Println("Writing response headers", err)
+	s.l.Println("Writing response headers", err)
 }
 
-func copyHeaders(dst, src *http.Request) {
+func (s *server) copyHeaders(dst, src *http.Request) {
 	for h, vs := range src.Header {
 		for _, v := range vs {
 			dst.Header.Add(h, v)
 		}
 	}
-	fmt.Println("Final headers")
-	fmt.Println(dst.Header)
+	s.l.Println("Final headers")
+	s.l.Println(dst.Header)
 }
 
-func readHeadersFromFile(w http.ResponseWriter, filepath string) error {
+func (s *server) readHeadersFromFile(w http.ResponseWriter, filepath string) error {
 	var resHeader http.Header
 	f, err := os.Open(filepath)
 	if err != nil {
-		fmt.Println("error reading response headers file: ", err)
+		s.l.Println("error reading response headers file: ", err)
 		return err
 	}
 	err = json.NewDecoder(f).Decode(&resHeader)
 	if err != nil {
-		fmt.Println("error decoding response headers file: ", err)
+		s.l.Println("error decoding response headers file: ", err)
 		return err
 	}
 	for header, vs := range resHeader {
+		if header == Status {
+			continue
+		}
 		for _, v := range vs {
 			w.Header().Add(header, v)
 		}
 	}
-	s := resHeader.Get("Status")
-	status, _ := strconv.Atoi(s)
+	st := resHeader.Get(Status)
+	status, _ := strconv.Atoi(st)
 	if status != 0 {
 		w.WriteHeader(status)
 	} else {

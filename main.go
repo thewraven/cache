@@ -13,7 +13,7 @@ type serverInfo struct {
 	LocalPort     string `json:"local"`
 	Timeout       int    `json:"timeout_minutes"`
 	CachePath     string `json:"cache_path"`
-	Type          string `json:"type"`
+	Name          string `json:"name"`
 }
 
 var (
